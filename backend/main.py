@@ -28,7 +28,7 @@ tox_model = None
 TOX_MODEL_PATH = os.path.join(MODEL_DIR, "final_tox21_model_state.pt")
 
 
-# ✅ Toxicity Model Definition
+
 class ToxicityNet(nn.Module):
     def __init__(self, input_dim=1024, hidden_dim=2000, output_dim=12, dropout=0.18, stddev=0.025):
         super().__init__()
