@@ -10,15 +10,15 @@ import torch.nn as nn
 import numpy as np
 import joblib
 import os
+import uvicorn  
 
 
-app = FastAPI()
+app = FastAPI(title="Molecular Predictor API")
 
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(BASE_DIR, "model")
 
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "..", "model")
 
 solubility_model = joblib.load(os.path.join(MODEL_DIR, "model_solubility.pkl"))
 drug_model = joblib.load(os.path.join(MODEL_DIR, "xgb_model_drug.pkl"))
@@ -28,10 +28,10 @@ tox_model = None
 TOX_MODEL_PATH = os.path.join(MODEL_DIR, "final_tox21_model_state.pt")
 
 
-
+# ✅ Toxicity Model Definition
 class ToxicityNet(nn.Module):
     def __init__(self, input_dim=1024, hidden_dim=2000, output_dim=12, dropout=0.18, stddev=0.025):
-        super(ToxicityNet, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         nn.init.normal_(self.fc1.weight, mean=0, std=stddev)
         self.relu = nn.ReLU()
@@ -43,16 +43,16 @@ class ToxicityNet(nn.Module):
         return self.fc2(self.dropout(self.relu(self.fc1(x))))
 
 
-
 @app.on_event("startup")
 def load_toxicity_model():
+    """Load PyTorch toxicity model on startup"""
     global tox_model
     state_dict = torch.load(TOX_MODEL_PATH, map_location="cpu")
-    model = ToxicityNet(input_dim=1024, hidden_dim=2000, output_dim=12, dropout=0.18)
+    model = ToxicityNet()
     model.load_state_dict(state_dict)
     model.eval()
     tox_model = model
-    print("Toxicity model loaded successfully!")
+    print("✅ Toxicity model loaded successfully!")
 
 
 
@@ -64,6 +64,7 @@ def morgan_fingerprint(smiles, radius=2, nBits=1024):
     arr = np.zeros((nBits,), dtype=int)
     DataStructs.ConvertToNumpyArray(fp, arr)
     return arr
+
 
 def report_toxicity_pytorch(smiles, model, threshold=0.75):
     fp = morgan_fingerprint(smiles)
@@ -100,36 +101,36 @@ def report_toxicity_pytorch(smiles, model, threshold=0.75):
     any_toxic = False
 
     for i, task in enumerate(tasks):
-        prob = probs[i]
-        pred = preds[i]
-        if pred == 1:
+        if preds[i] == 1:
             any_toxic = True
-            report_lines.append(f"[{task}] Toxicity Likely (Probability: {prob:.2f})")
+            report_lines.append(f"[{task}] Toxicity Likely (Probability: {probs[i]:.2f})")
             report_lines.append(f"   ↳ {assay_info.get(task, 'No description available.')}")
     if not any_toxic:
         report_lines.append("No significant toxicity predicted.")
 
     return "\n".join(report_lines)
 
+
 def get_descriptors(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
     return {
-        'MolWt': Descriptors.MolWt(mol),
-        'LogP': Descriptors.MolLogP(mol),
-        'NumHDonors': Descriptors.NumHDonors(mol),
-        'NumHAcceptors': Descriptors.NumHAcceptors(mol),
-        'TPSA': Descriptors.TPSA(mol),
-        'RingCount': Descriptors.RingCount(mol),
-        'NumRotatableBonds': Descriptors.NumRotatableBonds(mol),
-        'Fsp3': Descriptors.FractionCSP3(mol)
+        "MolWt": Descriptors.MolWt(mol),
+        "LogP": Descriptors.MolLogP(mol),
+        "NumHDonors": Descriptors.NumHDonors(mol),
+        "NumHAcceptors": Descriptors.NumHAcceptors(mol),
+        "TPSA": Descriptors.TPSA(mol),
+        "RingCount": Descriptors.RingCount(mol),
+        "NumRotatableBonds": Descriptors.NumRotatableBonds(mol),
+        "Fsp3": Descriptors.FractionCSP3(mol),
     }
+
 
 def feature_extract(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        return 'Invalid Smiles'
+        return "Invalid Smiles"
     return {
         "MolWt": Descriptors.MolWt(mol),
         "LogP": Descriptors.MolLogP(mol),
@@ -139,69 +140,73 @@ def feature_extract(smiles: str):
         "armotic_ring": rdMolDescriptors.CalcNumAromaticRings(mol),
         "stero_centre": len(Chem.FindMolChiralCenters(mol, includeUnassigned=True)),
         "rot_bond": Lipinski.NumRotatableBonds(mol),
-        "qed_score": QED.qed(mol)
+        "qed_score": QED.qed(mol),
     }
 
 
-class Molecular_var(BaseModel):
-    smiles: Annotated[str, Field(..., description='SMILES of the molecule', example='CCO')]
 
-    @validator('smiles')
+class Molecular_var(BaseModel):
+    smiles: Annotated[str, Field(..., description="SMILES of the molecule", example="CCO")]
+
+    @validator("smiles")
     def valid_smiles(cls, v):
         mol = Chem.MolFromSmiles(v)
         if mol is None:
-            raise ValueError('Invalid SMILES string')
+            raise ValueError("Invalid SMILES string")
         return v
+
 
 
 @app.get("/")
 def root():
-    return {"message": "Molecular predictor API is running"}
+    return {"message": "Molecular predictor API is running 🚀"}
 
-@app.post('/predictSolubility', tags=['predict'])
+
+@app.post("/predictSolubility")
 def predict_solubility(smiles: Molecular_var):
     details = get_descriptors(smiles.smiles)
     if details is None:
-        return JSONResponse(status_code=400, content={'error': 'Invalid SMILES'})
+        return JSONResponse(status_code=400, content={"error": "Invalid SMILES"})
 
     params = [
-        details['MolWt'], details['LogP'], details['NumHDonors'],
-        details['NumHAcceptors'], details['TPSA'], details['RingCount'],
-        details['NumRotatableBonds'], details['Fsp3']
+        details["MolWt"], details["LogP"], details["NumHDonors"],
+        details["NumHAcceptors"], details["TPSA"], details["RingCount"],
+        details["NumRotatableBonds"], details["Fsp3"]
     ]
 
     value = solubility_model.predict([params])
-    return JSONResponse(status_code=200, content={
-        'smiles': smiles.smiles,
-        'predicted_solubility': round(float(value[0]), 2),
-        'descriptors': details
-    })
+    return {"smiles": smiles.smiles, "predicted_solubility": round(float(value[0]), 2), "descriptors": details}
 
-@app.post('/predictTox', tags=['predict'])
+
+@app.post("/predictTox")
 def predict_toxicity(smiles: Molecular_var):
     if tox_model is None:
-        return JSONResponse(status_code=500, content={'error': 'Toxicity model not loaded'})
+        return JSONResponse(status_code=500, content={"error": "Toxicity model not loaded"})
 
     report = report_toxicity_pytorch(smiles.smiles, tox_model)
-    return JSONResponse(status_code=200, content={'toxicity_report': report})
+    return {"toxicity_report": report}
 
-@app.post('/predictdrug', tags=['predict'])
+
+@app.post("/predictDrug")
 def predict_drug(smiles: Molecular_var):
     desc = feature_extract(smiles.smiles)
-
-    if desc == 'Invalid Smiles':
-        return JSONResponse(status_code=400, content={'error': 'Invalid SMILES'})
+    if desc == "Invalid Smiles":
+        return JSONResponse(status_code=400, content={"error": "Invalid SMILES"})
 
     param = [
-        desc['MolWt'], desc['LogP'], desc['Formal_Charge'], desc['NumHDonors'],
-        desc['NumHAcceptors'], desc['armotic_ring'], desc['stero_centre'], desc['rot_bond']
+        desc["MolWt"], desc["LogP"], desc["Formal_Charge"], desc["NumHDonors"],
+        desc["NumHAcceptors"], desc["armotic_ring"], desc["stero_centre"], desc["rot_bond"]
     ]
 
     scaled = drug_scaler.transform([param])
     prediction = drug_model.predict_proba(scaled)
 
-    return JSONResponse(status_code=200, content={
-        'Drug Class': int(np.argmax(prediction)),
-        'Drug Probability': float(np.max(prediction)),
-        "qed_Score": desc['qed_score']
-    })
+    return {
+        "Drug Class": int(np.argmax(prediction)),
+        "Drug Probability": float(np.max(prediction)),
+        "qed_Score": desc["qed_score"],
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
