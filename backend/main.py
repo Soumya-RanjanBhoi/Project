@@ -5,26 +5,27 @@ from fastapi.responses import JSONResponse
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem, QED, rdMolDescriptors, Lipinski
 from rdkit import DataStructs
-import pickle
 import torch
 import torch.nn as nn
 import numpy as np
-from collections import OrderedDict
-import xgboost as xgb
+import joblib
+import os
+
 
 app = FastAPI()
 
 
-with open('model/model_solubility.pkl', 'rb') as f:
-    solubility_model = pickle.load(f)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(BASE_DIR, "model")
 
-with open('model/xgb_model_drug.pkl', 'rb') as f:
-    drug_model = pickle.load(f)
 
-with open('model/drug_scaler_1.pkl', 'rb') as f:
-    drug_scaler = pickle.load(f)
 
-tox_model = None 
+solubility_model = joblib.load(os.path.join(MODEL_DIR, "model_solubility.pkl"))
+drug_model = joblib.load(os.path.join(MODEL_DIR, "xgb_model_drug.pkl"))
+drug_scaler = joblib.load(os.path.join(MODEL_DIR, "drug_scaler_1.pkl"))
+
+tox_model = None
+TOX_MODEL_PATH = os.path.join(MODEL_DIR, "final_tox21_model_state.pt")
 
 
 
@@ -43,6 +44,18 @@ class ToxicityNet(nn.Module):
 
 
 
+@app.on_event("startup")
+def load_toxicity_model():
+    global tox_model
+    state_dict = torch.load(TOX_MODEL_PATH, map_location="cpu")
+    model = ToxicityNet(input_dim=1024, hidden_dim=2000, output_dim=12, dropout=0.18)
+    model.load_state_dict(state_dict)
+    model.eval()
+    tox_model = model
+    print("Toxicity model loaded successfully!")
+
+
+
 def morgan_fingerprint(smiles, radius=2, nBits=1024):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -58,7 +71,6 @@ def report_toxicity_pytorch(smiles, model, threshold=0.75):
         return "Invalid SMILES string."
 
     x = torch.tensor([fp], dtype=torch.float32)
-
     with torch.no_grad():
         logits = model(x)
         probs = torch.sigmoid(logits).numpy()[0]
@@ -99,23 +111,6 @@ def report_toxicity_pytorch(smiles, model, threshold=0.75):
 
     return "\n".join(report_lines)
 
-
-
-@app.on_event("startup")
-def load_toxicity_model():
-    global tox_model
-    state_dict = torch.load("model/final_tox21_model_state.pt", map_location="cpu", weights_only=True)
-
-    model = ToxicityNet(input_dim=1024, hidden_dim=2000, output_dim=12, dropout=0.18)
-    model.load_state_dict(state_dict)
-    model.eval()
-    tox_model = model
-
-    print("Toxicity model loaded successfully!")
-
-
-
-
 def get_descriptors(smiles: str):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -148,7 +143,6 @@ def feature_extract(smiles: str):
     }
 
 
-#
 class Molecular_var(BaseModel):
     smiles: Annotated[str, Field(..., description='SMILES of the molecule', example='CCO')]
 
@@ -158,7 +152,6 @@ class Molecular_var(BaseModel):
         if mol is None:
             raise ValueError('Invalid SMILES string')
         return v
-
 
 
 @app.get("/")
@@ -195,6 +188,9 @@ def predict_toxicity(smiles: Molecular_var):
 @app.post('/predictdrug', tags=['predict'])
 def predict_drug(smiles: Molecular_var):
     desc = feature_extract(smiles.smiles)
+
+    if desc == 'Invalid Smiles':
+        return JSONResponse(status_code=400, content={'error': 'Invalid SMILES'})
 
     param = [
         desc['MolWt'], desc['LogP'], desc['Formal_Charge'], desc['NumHDonors'],
